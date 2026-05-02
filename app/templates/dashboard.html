@@ -2,17 +2,289 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DriftGuard — Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
     <style>
-      body { background:#1a1a2e; color:#e6eef8; font-family: Arial, sans-serif; padding:24px }
-      .center { text-align:center; margin-top:80px }
-      .card { background:#16213e; padding:16px; border-radius:8px }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        background: linear-gradient(135deg, #0f1419 0%, #1a1a2e 100%);
+        color: #e6eef8;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        padding: 24px;
+        line-height: 1.6;
+      }
+      .container { max-width: 1400px; margin: 0 auto; }
+      
+      .header {
+        margin-bottom: 32px;
+        text-align: center;
+      }
+      .header h1 {
+        font-size: 2.5em;
+        margin-bottom: 8px;
+        background: linear-gradient(135deg, #00d4ff, #0099ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      .header p { color: #b0b8c8; font-size: 0.95em; }
+      
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin-bottom: 32px;
+      }
+      .stat-card {
+        background: rgba(22, 33, 62, 0.8);
+        border: 1px solid rgba(0, 212, 255, 0.1);
+        border-radius: 8px;
+        padding: 20px;
+        text-align: center;
+      }
+      .stat-card .emoji { font-size: 2em; margin-bottom: 12px; }
+      .stat-card .label { font-size: 0.85em; color: #b0b8c8; margin-bottom: 8px; }
+      .stat-card .value { font-size: 2em; font-weight: bold; background: linear-gradient(135deg, #00d4ff, #0099ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+      
+      .section {
+        background: rgba(22, 33, 62, 0.5);
+        border: 1px solid rgba(0, 212, 255, 0.1);
+        border-radius: 8px;
+        padding: 24px;
+        margin-bottom: 24px;
+      }
+      .section h2 {
+        font-size: 1.3em;
+        margin-bottom: 20px;
+        color: #00d4ff;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      
+      .chart-container {
+        position: relative;
+        height: 400px;
+        margin-bottom: 20px;
+      }
+      
+      .file-table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      .file-table thead tr {
+        background: rgba(0, 212, 255, 0.1);
+        border-bottom: 2px solid rgba(0, 212, 255, 0.2);
+      }
+      .file-table th {
+        padding: 12px;
+        text-align: left;
+        font-weight: 600;
+        color: #00d4ff;
+        font-size: 0.9em;
+      }
+      .file-table td {
+        padding: 12px;
+        border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+      }
+      .file-table tbody tr:hover {
+        background: rgba(0, 212, 255, 0.05);
+      }
+      
+      .score-badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.85em;
+        font-weight: 600;
+      }
+      .score-critical { background: rgba(255, 51, 51, 0.2); color: #ff6b6b; }
+      .score-at-risk { background: rgba(255, 152, 0, 0.2); color: #ffb74d; }
+      .score-watch { background: rgba(255, 193, 7, 0.2); color: #ffd54f; }
+      .score-healthy { background: rgba(76, 175, 80, 0.2); color: #81c784; }
+      
+      .footer {
+        text-align: center;
+        padding: 24px 0;
+        color: #888;
+        font-size: 0.85em;
+        border-top: 1px solid rgba(0, 212, 255, 0.1);
+        margin-top: 32px;
+      }
+      
+      .no-data {
+        text-align: center;
+        padding: 40px 20px;
+        color: #b0b8c8;
+      }
     </style>
   </head>
   <body>
-    <div class="center card">
-      <h1>🔍 DriftGuard</h1>
-      <p>Run DriftGuard first: python driftguard.py --repo . --days 30</p>
+    <div class="container">
+      
+      <!-- Header -->
+      <div class="header">
+        <h1>🔍 DriftGuard</h1>
+        <p>Codebase Decay Monitor</p>
+        {% if report %}
+        <p style="font-size: 0.85em; color: #888; margin-top: 12px;">
+          Repository: <strong>{{ report.repo }}</strong> | 
+          Last {{ report.analysis_window_days }} days | 
+          Analyzed: <strong>{{ report.analyzed_at }}</strong>
+        </p>
+        {% endif %}
+      </div>
+
+      {% if report %}
+      
+      <!-- Stats Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="emoji">📊</div>
+          <div class="label">Total Files</div>
+          <div class="value">{{ report.summary.total_files }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="emoji">🔴</div>
+          <div class="label">Critical</div>
+          <div class="value">{{ report.summary.critical_count }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="emoji">🟠</div>
+          <div class="label">At Risk</div>
+          <div class="value">{{ report.summary.at_risk_count }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="emoji">🟡</div>
+          <div class="label">Watch</div>
+          <div class="value">{{ report.summary.watch_count }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="emoji">🟢</div>
+          <div class="label">Healthy</div>
+          <div class="value">{{ report.summary.healthy_count }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="emoji">⚖️</div>
+          <div class="label">Average Score</div>
+          <div class="value">{{ report.summary.average_health_score }}/100</div>
+        </div>
+      </div>
+
+      <!-- Health Chart -->
+      <div class="section">
+        <h2>📈 File Health Scores</h2>
+        <div class="chart-container">
+          <canvas id="healthChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Files Table -->
+      <div class="section">
+        <h2>📋 Detailed Analysis</h2>
+        <table class="file-table">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Score</th>
+              <th>Status</th>
+              <th>Top Risk</th>
+              <th>Recommendation</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for file in report.files %}
+            <tr>
+              <td><code style="color: #00d4ff; background: rgba(0, 212, 255, 0.1); padding: 2px 6px; border-radius: 3px;">{{ file.file_path }}</code></td>
+              <td><strong>{{ file.health_score }}/100</strong></td>
+              <td>
+                <span class="score-badge score-{{ file.status | lower }}">
+                  {{ file.status_emoji }} {{ file.status }}
+                </span>
+              </td>
+              <td style="font-size: 0.9em;">{{ file.top_risk }}</td>
+              <td style="font-size: 0.9em; color: #b0b8c8;">{{ file.recommendation }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% else %}
+      <div class="section">
+        <div class="no-data">
+          <p>No report available yet.</p>
+          <p>Run DriftGuard to generate a report:</p>
+          <code style="background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 4px; display: inline-block; margin-top: 12px;">
+            python driftguard.py --repo . --days 30
+          </code>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Footer -->
+      <div class="footer">
+        Powered by IBM Bob | DriftGuard MVP 1.0
+      </div>
+
     </div>
+
+    <script>
+      {% if report %}
+      // Chart.js configuration
+      const ctx = document.getElementById('healthChart').getContext('2d');
+      const files = {{ report.files | tojson }};
+      const labels = files.map(f => f.file_path.split('/').pop());
+      const scores = files.map(f => f.health_score);
+      const colors = files.map(f => {
+        if (f.status === 'CRITICAL') return 'rgba(255, 51, 51, 0.6)';
+        if (f.status === 'AT_RISK') return 'rgba(255, 152, 0, 0.6)';
+        if (f.status === 'WATCH') return 'rgba(255, 193, 7, 0.6)';
+        return 'rgba(76, 175, 80, 0.6)';
+      });
+
+      new Chart(ctx, {
+        type: 'barh',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Health Score',
+            data: scores,
+            backgroundColor: colors,
+            borderColor: colors.map(c => c.replace('0.6', '1')),
+            borderWidth: 1,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  return context.parsed.x + '/100';
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              min: 0,
+              max: 100,
+              grid: { color: 'rgba(0, 212, 255, 0.1)' },
+              ticks: { color: '#b0b8c8' }
+            },
+            y: {
+              grid: { display: false },
+              ticks: { color: '#b0b8c8' }
+            }
+          }
+        }
+      });
+      {% endif %}
+    </script>
   </body>
 </html>
