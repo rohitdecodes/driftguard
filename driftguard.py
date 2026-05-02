@@ -51,7 +51,7 @@ def main():
     # Step 2: Analyze with bob_analyzer
     print(f"\n🤖 Analyzing {len(file_diffs)} files for decay signals...")
     try:
-        analyses = batch_analyze(file_diffs, verbose=args.verbose)
+        analyses = batch_analyze(file_diffs)
     except Exception as e:
         print(f"❌ Error during analysis: {e}")
         sys.exit(1)
