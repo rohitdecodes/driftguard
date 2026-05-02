@@ -1,475 +1,290 @@
 """bob_analyzer.py
 
-Rule-based code decay analyzer for DriftGuard.
-Analyzes file diffs using heuristics (no external APIs/LLMs).
+IBM Bob Shell integration for DriftGuard.
+Calls Bob in non-interactive mode to analyze code diffs for decay signals.
 """
 
+import subprocess
+import json
 import re
-from typing import List, Dict
-from app.models import FileDiff, AnalysisResult
-from app.config import Config
+import time
+from typing import Dict, List, Optional
+from pathlib import Path
 
 
 def analyze_file_decay(file_data: Dict) -> Dict:
     """
-    Analyze a single file's decay using rule-based heuristics.
+    Analyze a single file's diff using IBM Bob Shell.
     
     Args:
-        file_data: Dict with keys: file_path, diff_text, total_commits, language
-        
+        file_data: Dict with keys: file_path, language, total_commits, diff_text, 
+                   last_modified, commit_hashes
+    
     Returns:
-        Dict with decay scores and analysis (AnalysisResult schema)
+        Dict with original file_data plus Bob's analysis:
+        - documentation_drift_score: int (0-100)
+        - test_drift_score: int (0-100)
+        - complexity_growth_score: int (0-100)
+        - naming_consistency_score: int (0-100)
+        - decay_summary: str
+        - top_risk: str
+        - recommendation: str
     """
-    diff_text = file_data.get('diff_text', '')
-    file_path = file_data.get('file_path', '')
-    language = file_data.get('language', 'unknown')
+    # Build the analysis prompt
+    prompt = _build_analysis_prompt(file_data)
     
-    # Calculate individual dimension scores
-    doc_score = _calculate_documentation_drift_score(diff_text, language)
-    test_score = _calculate_test_drift_score(file_path, diff_text)
-    complexity_score = _calculate_complexity_growth_score(diff_text, language)
-    naming_score = _calculate_naming_consistency_score(diff_text, language)
+    try:
+        # Call Bob Shell in non-interactive mode
+        result = subprocess.run(
+            ['bob', '-p', prompt],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode != 0:
+            print(f"⚠️  Bob Shell error for {file_data['file_path']}: {result.stderr}")
+            return _create_fallback_analysis(file_data, "Bob Shell execution failed")
+        
+        # Parse Bob's response
+        analysis = _parse_bob_response(result.stdout)
+        
+        if analysis is None:
+            print(f"⚠️  Failed to parse Bob response for {file_data['file_path']}")
+            return _create_fallback_analysis(file_data, "Response parsing failed")
+        
+        # Merge with original file data
+        result_data = {**file_data, **analysis}
+        return result_data
+        
+    except subprocess.TimeoutExpired:
+        print(f"⚠️  Bob Shell timeout for {file_data['file_path']}")
+        return _create_fallback_analysis(file_data, "Analysis timeout")
     
-    # Determine top risk and recommendation
-    scores = {
-        'documentation': doc_score,
-        'test_coverage': test_score,
-        'complexity': complexity_score,
-        'naming': naming_score
-    }
+    except FileNotFoundError:
+        print("❌ Bob Shell not found. Please install IBM Bob CLI.")
+        print("   Visit: https://bob.ibm.com")
+        return _create_fallback_analysis(file_data, "Bob Shell not installed")
     
-    lowest_dimension = min(scores.keys(), key=lambda k: scores[k])
-    lowest_score = scores[lowest_dimension]
-    
-    top_risk, recommendation = _generate_risk_and_recommendation(
-        lowest_dimension, lowest_score, file_path
-    )
-    
-    # Generate decay summary
-    decay_summary = _generate_decay_summary(scores, file_path)
-    
-    # Build result dict matching AnalysisResult schema
-    result: AnalysisResult = {
-        'file_path': file_data.get('file_path', ''),
-        'language': file_data.get('language', 'unknown'),
-        'total_commits': file_data.get('total_commits', 0),
-        'diff_text': diff_text,
-        'last_modified': file_data.get('last_modified', ''),
-        'commit_hashes': file_data.get('commit_hashes', []),
-        'documentation_drift_score': doc_score,
-        'test_drift_score': test_score,
-        'complexity_growth_score': complexity_score,
-        'naming_consistency_score': naming_score,
-        'decay_summary': decay_summary,
-        'top_risk': top_risk,
-        'recommendation': recommendation,
-    }
-    
-    return result
+    except Exception as e:
+        print(f"⚠️  Unexpected error analyzing {file_data['file_path']}: {e}")
+        return _create_fallback_analysis(file_data, f"Unexpected error: {str(e)}")
 
 
-def batch_analyze(file_diffs: List[Dict]) -> List[Dict]:
+def _build_analysis_prompt(file_data: Dict) -> str:
+    """Build the decay analysis prompt for Bob."""
+    prompt = f"""You are analyzing a code diff for signs of technical decay. Analyze the following diff and return ONLY a JSON object with this exact structure — no explanation, no markdown code blocks, just the raw JSON:
+
+{{
+  "documentation_drift_score": <integer 0-100, where 0=severe drift, 100=no drift>,
+  "test_drift_score": <integer 0-100>,
+  "complexity_growth_score": <integer 0-100, where 0=severe complexity increase, 100=no growth>,
+  "naming_consistency_score": <integer 0-100>,
+  "decay_summary": "<2-3 sentence plain English explanation of the main decay signals>",
+  "top_risk": "<single most concerning decay pattern observed>",
+  "recommendation": "<one specific action to address the highest risk>"
+}}
+
+Scoring guide:
+- documentation_drift_score: Did logic change without docstring/comment updates? 0=massive undocumented changes, 100=all changes documented
+- test_drift_score: Were tests updated when implementation changed? 0=implementation changed, no tests touched, 100=tests updated or added
+- complexity_growth_score: Did functions grow longer, add nesting, or gain parameters? 0=severe complexity increase, 100=complexity unchanged or reduced
+- naming_consistency_score: Are new identifiers consistent with the existing naming conventions? 0=many inconsistencies, 100=perfectly consistent
+
+File: {file_data['file_path']}
+Language: {file_data['language']}
+Commits in window: {file_data['total_commits']}
+
+Diff:
+{file_data['diff_text']}
+
+Return ONLY the JSON object, nothing else."""
+    
+    return prompt
+
+
+def _parse_bob_response(response: str) -> Optional[Dict]:
     """
-    Analyze multiple files with progress reporting.
+    Parse Bob's response to extract the JSON analysis.
+    Handles cases where Bob wraps JSON in markdown or adds explanation text.
+    """
+    # Try to find JSON in markdown code blocks first
+    json_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
+    match = re.search(json_block_pattern, response, re.DOTALL)
+    
+    if match:
+        json_str = match.group(1)
+    else:
+        # Try to find raw JSON object
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+        match = re.search(json_pattern, response, re.DOTALL)
+        if match:
+            json_str = match.group(0)
+        else:
+            return None
+    
+    try:
+        data = json.loads(json_str)
+        
+        # Validate and sanitize the response
+        validated = _validate_analysis_response(data)
+        return validated
+        
+    except json.JSONDecodeError:
+        return None
+
+
+def _validate_analysis_response(data: Dict) -> Dict:
+    """
+    Validate Bob's response has all required fields with correct types.
+    Fill in defaults if needed.
+    """
+    required_fields = {
+        'documentation_drift_score': 50,
+        'test_drift_score': 50,
+        'complexity_growth_score': 50,
+        'naming_consistency_score': 50,
+        'decay_summary': 'Analysis unavailable',
+        'top_risk': 'Unable to determine',
+        'recommendation': 'Manual review recommended'
+    }
+    
+    validated = {}
+    
+    for field, default in required_fields.items():
+        if field in data:
+            value = data[field]
+            
+            # Ensure scores are integers in range 0-100
+            if 'score' in field:
+                try:
+                    score = int(value)
+                    validated[field] = max(0, min(100, score))
+                except (ValueError, TypeError):
+                    validated[field] = default
+            else:
+                # String fields
+                validated[field] = str(value) if value else default
+        else:
+            validated[field] = default
+    
+    return validated
+
+
+def _create_fallback_analysis(file_data: Dict, reason: str) -> Dict:
+    """
+    Create a fallback analysis when Bob Shell fails.
+    Returns neutral scores with explanation.
+    """
+    return {
+        **file_data,
+        'documentation_drift_score': 50,
+        'test_drift_score': 50,
+        'complexity_growth_score': 50,
+        'naming_consistency_score': 50,
+        'decay_summary': f'Analysis unavailable: {reason}',
+        'top_risk': 'Unable to analyze - manual review needed',
+        'recommendation': 'Run analysis again or review manually'
+    }
+
+
+def batch_analyze(file_diffs: List[Dict], delay: float = 2.0) -> List[Dict]:
+    """
+    Analyze multiple files in batch with progress tracking.
     
     Args:
-        file_diffs: List of file_data dicts from git_parser
-        
+        file_diffs: List of file diff dicts from git_parser
+        delay: Seconds to wait between Bob calls (to avoid rate limits)
+    
     Returns:
-        List of AnalysisResult dicts
+        List of analysis results (file data + Bob analysis)
     """
     results = []
     total = len(file_diffs)
     
-    print(f"\n[ANALYZER] Analyzing {total} files...")
-    print("-" * 60)
+    print(f"\n🤖 Analyzing {total} files with IBM Bob...")
+    print("=" * 60)
     
     for i, file_data in enumerate(file_diffs, 1):
-        file_path = file_data.get('file_path', 'unknown')
-        print(f"[{i}/{total}] Analyzing: {file_path}")
+        filename = Path(file_data['file_path']).name
+        print(f"[{i}/{total}] Analyzing: {filename}...", end=' ', flush=True)
         
-        try:
-            result = analyze_file_decay(file_data)
-            results.append(result)
-            
-            # Show quick score summary
+        analysis = analyze_file_decay(file_data)
+        results.append(analysis)
+        
+        # Show quick status
+        if 'documentation_drift_score' in analysis:
             avg_score = (
-                result['documentation_drift_score'] +
-                result['test_drift_score'] +
-                result['complexity_growth_score'] +
-                result['naming_consistency_score']
+                analysis['documentation_drift_score'] +
+                analysis['test_drift_score'] +
+                analysis['complexity_growth_score'] +
+                analysis['naming_consistency_score']
             ) / 4
-            print(f"         Average score: {avg_score:.1f}/100")
-            
-        except Exception as e:
-            print(f"         [ERROR] Failed to analyze: {e}")
-            continue
+            status = "✅" if avg_score >= 70 else "⚠️" if avg_score >= 50 else "🔴"
+            print(f"{status} (score: {avg_score:.0f})")
+        else:
+            print("⚠️  (fallback)")
+        
+        # Rate limiting delay (except for last file)
+        if i < total:
+            time.sleep(delay)
     
-    print("-" * 60)
-    print(f"[ANALYZER] Completed: {len(results)}/{total} files analyzed\n")
+    print("=" * 60)
+    print(f"✅ Batch analysis complete: {total} files processed\n")
     
     return results
 
 
-# ============================================================================
-# DIMENSION SCORING FUNCTIONS
-# ============================================================================
-
-def _calculate_documentation_drift_score(diff_text: str, language: str) -> int:
-    """
-    Score: 0-100 (higher = better documentation practices)
-    
-    Rule: If added 50+ lines with 0 comments/docstrings → 20, else 70+
-    """
-    lines = diff_text.split('\n')
-    added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
-    
-    # Count added code lines (exclude empty lines)
-    added_code_lines = [line for line in added_lines if line.strip() and len(line.strip()) > 1]
-    added_count = len(added_code_lines)
-    
-    if added_count == 0:
-        return 100  # No changes, perfect score
-    
-    # Count added comments/docstrings
-    comment_patterns = {
-        'python': [r'^\+\s*#', r'^\+\s*"""', r"^\+\s*'''"],
-        'javascript': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
-        'typescript': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
-        'java': [r'^\+\s*//', r'^\+\s*/\*', r'^\+\s*\*'],
-    }
-    
-    patterns = comment_patterns.get(language, [r'^\+\s*#', r'^\+\s*//'])
-    comment_count = 0
-    
-    for line in added_lines:
-        for pattern in patterns:
-            if re.search(pattern, line):
-                comment_count += 1
-                break
-    
-    # Calculate documentation ratio
-    doc_ratio = comment_count / added_count if added_count > 0 else 0
-    
-    # Apply scoring rules
-    threshold = Config.RULE_DOC_DRIFT_THRESHOLD_ADDED_LINES
-    
-    if added_count >= threshold and comment_count == 0:
-        return 20  # Large change with no documentation
-    elif added_count >= threshold and doc_ratio < 0.05:
-        return 40  # Large change with minimal documentation
-    elif doc_ratio < 0.1:
-        return 60  # Some documentation but below 10%
-    elif doc_ratio < 0.2:
-        return 75  # Decent documentation (10-20%)
-    else:
-        return 90  # Good documentation (20%+)
-
-
-def _calculate_test_drift_score(file_path: str, diff_text: str) -> int:
-    """
-    Score: 0-100 (higher = better test coverage)
-    
-    Rule: If implementation changed but no test touched → 30, else 60+
-    """
-    is_test_file = _is_test_file(file_path)
-    
-    # If this is a test file, give high score
-    if is_test_file:
-        return 85
-    
-    # Check if diff mentions test-related changes
-    test_keywords = ['test', 'spec', 'mock', 'assert', 'expect', 'describe', 'it(']
-    has_test_mentions = any(keyword in diff_text.lower() for keyword in test_keywords)
-    
-    # Count lines changed
-    lines = diff_text.split('\n')
-    added_lines = len([l for l in lines if l.startswith('+') and not l.startswith('+++')])
-    deleted_lines = len([l for l in lines if l.startswith('-') and not l.startswith('---')])
-    total_changes = added_lines + deleted_lines
-    
-    # Scoring logic
-    if total_changes == 0:
-        return 100  # No changes
-    
-    if total_changes > 50 and not has_test_mentions:
-        return 30  # Large implementation change with no test mentions
-    elif total_changes > 20 and not has_test_mentions:
-        return 50  # Medium change with no test mentions
-    elif has_test_mentions:
-        return 75  # Test-related changes detected
-    else:
-        return 65  # Small change, acceptable
-
-
-def _calculate_complexity_growth_score(diff_text: str, language: str) -> int:
-    """
-    Score: 0-100 (higher = better complexity management)
-    
-    Rule: Count indentation/nesting increases. High increase → 40, else 70+
-    """
-    lines = diff_text.split('\n')
-    added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
-    
-    if not added_lines:
-        return 100  # No changes
-    
-    # Measure nesting depth increases
-    max_nesting = 0
-    avg_nesting = 0
-    nesting_samples = []
-    
-    for line in added_lines:
-        if not line.strip():
-            continue
-        
-        # Count leading whitespace (indentation)
-        stripped = line.lstrip('+')
-        if not stripped.strip():
-            continue
-            
-        indent = len(stripped) - len(stripped.lstrip())
-        
-        # Estimate nesting level (4 spaces or 1 tab = 1 level)
-        if '\t' in stripped[:indent]:
-            nesting_level = stripped[:indent].count('\t')
-        else:
-            nesting_level = indent // 4
-        
-        nesting_samples.append(nesting_level)
-        max_nesting = max(max_nesting, nesting_level)
-    
-    if nesting_samples:
-        avg_nesting = sum(nesting_samples) / len(nesting_samples)
-    
-    # Check for long functions (heuristic: many consecutive added lines)
-    consecutive_adds = 0
-    max_consecutive = 0
-    
-    for line in lines:
-        if line.startswith('+') and not line.startswith('+++'):
-            consecutive_adds += 1
-            max_consecutive = max(max_consecutive, consecutive_adds)
-        else:
-            consecutive_adds = 0
-    
-    # Scoring based on complexity indicators
-    threshold = Config.RULE_COMPLEXITY_NESTING_THRESHOLD
-    
-    if max_nesting > threshold + 3:  # Very deep nesting (5+ levels)
-        return 30
-    elif max_nesting > threshold + 1:  # Deep nesting (3-4 levels)
-        return 50
-    elif max_consecutive > 100:  # Very long function addition
-        return 45
-    elif max_consecutive > 50:  # Long function addition
-        return 60
-    elif avg_nesting > 2:  # Moderate average nesting
-        return 70
-    else:
-        return 85  # Good complexity management
-
-
-def _calculate_naming_consistency_score(diff_text: str, language: str) -> int:
-    """
-    Score: 0-100 (higher = better naming consistency)
-    
-    Rule: Look for snake_case vs camelCase inconsistencies → 50-80 based on violations
-    """
-    lines = diff_text.split('\n')
-    added_lines = [line for line in lines if line.startswith('+') and not line.startswith('+++')]
-    
-    if not added_lines:
-        return 100  # No changes
-    
-    # Extract identifiers from added lines
-    # Pattern: variable/function names (alphanumeric + underscore)
-    identifier_pattern = r'\b([a-z_][a-z0-9_]*)\b'
-    identifiers = []
-    
-    for line in added_lines:
-        # Skip comments and strings
-        if '#' in line or '//' in line or '/*' in line or '"' in line or "'" in line:
-            continue
-        
-        matches = re.findall(identifier_pattern, line.lower())
-        identifiers.extend(matches)
-    
-    if not identifiers:
-        return 100  # No identifiers found
-    
-    # Analyze naming patterns
-    snake_case_count = sum(1 for name in identifiers if '_' in name and name.islower())
-    camel_case_count = sum(1 for name in identifiers if '_' not in name and any(c.isupper() for c in name))
-    
-    # Language-specific conventions
-    expected_style = {
-        'python': 'snake_case',
-        'javascript': 'camelCase',
-        'typescript': 'camelCase',
-        'java': 'camelCase',
-    }
-    
-    style = expected_style.get(language, 'snake_case')
-    
-    # Calculate consistency
-    total_styled = snake_case_count + camel_case_count
-    if total_styled == 0:
-        return 80  # No clear style detected
-    
-    if style == 'snake_case':
-        consistency_ratio = snake_case_count / total_styled
-    else:
-        consistency_ratio = camel_case_count / total_styled
-    
-    # Check for magic numbers (numbers in code that should be constants)
-    magic_number_pattern = r'\b\d{2,}\b'  # Numbers with 2+ digits
-    magic_numbers = re.findall(magic_number_pattern, '\n'.join(added_lines))
-    magic_count = len([n for n in magic_numbers if int(n) not in [0, 1, 10, 100, 1000]])
-    
-    # Scoring
-    if consistency_ratio < 0.5:
-        score = 50  # Highly inconsistent
-    elif consistency_ratio < 0.7:
-        score = 65  # Somewhat inconsistent
-    elif consistency_ratio < 0.85:
-        score = 75  # Mostly consistent
-    else:
-        score = 85  # Very consistent
-    
-    # Penalize for magic numbers
-    if magic_count > 5:
-        score -= 15
-    elif magic_count > 2:
-        score -= 10
-    
-    return max(50, min(100, score))
-
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def _is_test_file(file_path: str) -> bool:
-    """Check if file is a test file based on path/name."""
-    test_indicators = ['test', 'spec', '__tests__', 'tests/']
-    return any(indicator in file_path.lower() for indicator in test_indicators)
-
-
-def _generate_risk_and_recommendation(dimension: str, score: int, file_path: str) -> tuple:
-    """Generate top risk and recommendation based on lowest scoring dimension."""
-    
-    risk_templates = {
-        'documentation': (
-            f"Documentation drift detected in {file_path}",
-            "Add inline comments and docstrings to explain complex logic"
-        ),
-        'test_coverage': (
-            f"Test coverage gap in {file_path}",
-            "Write unit tests for new functionality or update existing tests"
-        ),
-        'complexity': (
-            f"Complexity growth in {file_path}",
-            "Refactor deeply nested code and break down long functions"
-        ),
-        'naming': (
-            f"Naming inconsistency in {file_path}",
-            "Standardize variable/function names to match project conventions"
-        ),
-    }
-    
-    if score < 40:
-        severity = "CRITICAL"
-    elif score < 60:
-        severity = "HIGH"
-    else:
-        severity = "MODERATE"
-    
-    risk, rec = risk_templates.get(dimension, ("Unknown risk", "Review code changes"))
-    return f"[{severity}] {risk}", rec
-
-
-def _generate_decay_summary(scores: Dict[str, int], file_path: str) -> str:
-    """Generate 2-3 sentence summary of decay analysis."""
-    avg_score = sum(scores.values()) / len(scores)
-    lowest_dim = min(scores.keys(), key=lambda k: scores[k])
-    lowest_score = scores[lowest_dim]
-    
-    if avg_score >= 75:
-        health = "healthy"
-    elif avg_score >= 60:
-        health = "showing minor decay"
-    elif avg_score >= 40:
-        health = "showing significant decay"
-    else:
-        health = "in critical condition"
-    
-    summary = f"File {file_path} is {health} with an average decay score of {avg_score:.1f}/100. "
-    summary += f"The weakest dimension is {lowest_dim.replace('_', ' ')} (score: {lowest_score}/100). "
-    
-    if lowest_score < 50:
-        summary += "Immediate attention required to prevent further degradation."
-    elif lowest_score < 70:
-        summary += "Consider addressing this area in the next refactoring cycle."
-    else:
-        summary += "Continue monitoring for future changes."
-    
-    return summary
-
-
-# ============================================================================
-# TEST FUNCTION
-# ============================================================================
-
 def test_bob_analyzer():
-    """Test the analyzer with sample data."""
-    print("\n[TEST] Testing bob_analyzer with sample data...")
+    """
+    Test function to verify Bob Shell integration.
+    Creates a sample diff and tests the analysis pipeline.
+    """
+    print("[TEST] Testing Bob Shell integration...")
     print("-" * 60)
     
-    # Sample file data
-    sample_diff = """
-@@ -10,5 +10,25 @@ def calculate_total(items):
--def old_function():
--    pass
-+def new_complex_function(data):
-+    result = []
-+    for item in data:
-+        if item > 0:
-+            for subitem in item.values():
-+                if subitem:
-+                    result.append(subitem * 100)
-+    return result
-+
-+def anotherFunction(x):
-+    return x * 42
-"""
-    
-    sample_file = {
-        'file_path': 'app/sample.py',
+    # Sample test data
+    test_file = {
+        'file_path': 'test/sample.py',
         'language': 'python',
         'total_commits': 3,
-        'diff_text': sample_diff,
-        'last_modified': '2026-05-02T10:00:00Z',
+        'diff_text': '''@@ -10,6 +10,15 @@ def calculate_total(items):
+-def calculate_total(items):
+-    total = 0
+-    for item in items:
+-        total += item
+-    return total
++def calculate_total(items, tax_rate=0):
++    # Calculate with tax
++    subtotal = 0
++    for item in items:
++        subtotal += item
++    if tax_rate > 0:
++        subtotal = subtotal * (1 + tax_rate)
++    return subtotal''',
+        'last_modified': '2026-05-02T12:00:00Z',
         'commit_hashes': ['abc123', 'def456', 'ghi789']
     }
     
-    # Analyze single file
-    result = analyze_file_decay(sample_file)
+    print(f"Test file: {test_file['file_path']}")
+    print(f"Language: {test_file['language']}")
+    print(f"Commits: {test_file['total_commits']}")
+    print("-" * 60)
     
-    print(f"\nFile: {result['file_path']}")
-    print(f"Language: {result['language']}")
-    print(f"Total commits: {result['total_commits']}")
-    print(f"\nDecay Scores:")
-    print(f"  Documentation drift: {result['documentation_drift_score']}/100")
-    print(f"  Test drift: {result['test_drift_score']}/100")
-    print(f"  Complexity growth: {result['complexity_growth_score']}/100")
-    print(f"  Naming consistency: {result['naming_consistency_score']}/100")
-    print(f"\nTop Risk: {result['top_risk']}")
-    print(f"Recommendation: {result['recommendation']}")
-    print(f"\nSummary: {result['decay_summary']}")
+    # Run analysis
+    result = analyze_file_decay(test_file)
     
-    print("\n" + "-" * 60)
-    print("[TEST] Analyzer test complete!")
+    print("\n[RESULT] Analysis output:")
+    print(f"  Documentation drift: {result.get('documentation_drift_score', 'N/A')}/100")
+    print(f"  Test drift: {result.get('test_drift_score', 'N/A')}/100")
+    print(f"  Complexity growth: {result.get('complexity_growth_score', 'N/A')}/100")
+    print(f"  Naming consistency: {result.get('naming_consistency_score', 'N/A')}/100")
+    print(f"\n  Summary: {result.get('decay_summary', 'N/A')}")
+    print(f"  Top risk: {result.get('top_risk', 'N/A')}")
+    print(f"  Recommendation: {result.get('recommendation', 'N/A')}")
+    
+    print("\n" + "=" * 60)
+    print("[TEST] Complete")
 
 
 if __name__ == '__main__':

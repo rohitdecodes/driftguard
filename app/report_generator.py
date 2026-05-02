@@ -1,126 +1,325 @@
 """report_generator.py
 
-Build JSON reports from scored file data and save to disk.
+JSON report generation and persistence for DriftGuard.
 """
-import json
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import List, Dict
 
-from app.config import Config, get_output_report_path
-from app.models import DriftReport
-from app.scorer import generate_summary
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
 
 
 def generate_report(
-    repo_path: str,
-    days: int,
     scored_files: List[Dict],
-) -> DriftReport:
-    """Generate final DriftReport from scored files.
+    repo_path: str,
+    analysis_days: int,
+    metadata: Optional[Dict] = None
+) -> Dict:
+    """
+    Generate a complete DriftGuard report from scored files.
     
     Args:
-        repo_path: path to the repository
-        days: analysis window in days
-        scored_files: list of ScoredFile dicts from scorer.score_all_files()
+        scored_files: List of scored file dicts from scorer
+        repo_path: Path to the analyzed repository
+        analysis_days: Number of days analyzed
+        metadata: Optional additional metadata
     
     Returns:
-        DriftReport dict ready for JSON serialization
+        Complete DriftReport dict ready for JSON serialization
     """
+    from app.scorer import generate_summary
+    
+    # Generate summary statistics
     summary = generate_summary(scored_files)
     
-    report: DriftReport = {
-        'repo': str(repo_path),
-        'analysis_window_days': days,
-        'analyzed_at': datetime.now(timezone.utc).isoformat(),
+    # Build report
+    from datetime import timezone
+    report = {
+        'repo': repo_path,
+        'analysis_window_days': analysis_days,
+        'analyzed_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         'files': scored_files,
-        'summary': summary,
+        'summary': summary
     }
     
+    # Add optional metadata
+    if metadata:
+        report['metadata'] = metadata
+    
     return report
 
 
-def save_report(report: DriftReport, output_path: str = None) -> Path:
-    """Save DriftReport to JSON file.
-    
-    Args:
-        report: DriftReport dict from generate_report()
-        output_path: explicit output path, or auto-generate if None
-    
-    Returns:
-        Path object of saved file
+def save_report(report: Dict, output_path: str) -> None:
     """
-    if output_path is None:
-        output_path = get_output_report_path()
-    else:
-        output_path = Path(output_path)
-    
-    # Create parent directory if needed
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'w') as f:
-        json.dump(report, f, indent=2)
-    
-    return output_path
-
-
-def load_report(report_path: str) -> DriftReport:
-    """Load a saved DriftReport from JSON file.
-    
-    Args:
-        report_path: path to report JSON file
-    
-    Returns:
-        DriftReport dict
-    """
-    with open(report_path, 'r') as f:
-        report = json.load(f)
-    return report
-
-
-def print_report_summary(report: DriftReport) -> None:
-    """Print human-readable summary to terminal.
+    Save report as JSON file.
     
     Args:
         report: DriftReport dict
+        output_path: Path to save JSON file
+    """
+    output_file = Path(output_path)
+    
+    # Create parent directory if it doesn't exist
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write JSON with pretty formatting
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    
+    print(f"✅ Report saved to: {output_path}")
+
+
+def load_report(input_path: str) -> Dict:
+    """
+    Load report from JSON file.
+    
+    Args:
+        input_path: Path to JSON report file
+    
+    Returns:
+        DriftReport dict
+    
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        json.JSONDecodeError: If file is not valid JSON
+    """
+    input_file = Path(input_path)
+    
+    if not input_file.exists():
+        raise FileNotFoundError(f"Report file not found: {input_path}")
+    
+    with open(input_file, 'r', encoding='utf-8') as f:
+        report = json.load(f)
+    
+    return report
+
+
+def get_latest_report(output_dir: str) -> Optional[Dict]:
+    """
+    Find and load the most recent report from output directory.
+    
+    Args:
+        output_dir: Directory containing report files
+    
+    Returns:
+        DriftReport dict or None if no reports found
+    """
+    output_path = Path(output_dir)
+    
+    if not output_path.exists():
+        return None
+    
+    # Find all JSON files matching report pattern
+    report_files = list(output_path.glob('report_*.json'))
+    
+    if not report_files:
+        return None
+    
+    # Get most recent by modification time
+    latest_file = max(report_files, key=lambda p: p.stat().st_mtime)
+    
+    try:
+        return load_report(str(latest_file))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def format_report_summary(report: Dict) -> str:
+    """
+    Format report summary as human-readable text.
+    
+    Args:
+        report: DriftReport dict
+    
+    Returns:
+        Formatted summary string
     """
     summary = report.get('summary', {})
     
-    print()
-    print("=" * 70)
-    print(f"📊 DriftGuard Analysis Report")
-    print(f"Repository: {report.get('repo', 'unknown')}")
-    print(f"Analysis window: last {report.get('analysis_window_days', 0)} days")
-    print(f"Analyzed at: {report.get('analyzed_at', 'unknown')}")
-    print("=" * 70)
+    lines = [
+        "",
+        "=" * 80,
+        "📊 DRIFTGUARD REPORT SUMMARY",
+        "=" * 80,
+        f"Repository: {report.get('repo', 'Unknown')}",
+        f"Analysis Window: {report.get('analysis_window_days', 0)} days",
+        f"Analyzed At: {report.get('analyzed_at', 'Unknown')}",
+        "",
+        f"Total Files Analyzed: {summary.get('total_files', 0)}",
+        f"  🔴 Critical: {summary.get('critical_count', 0)}",
+        f"  🟠 At Risk: {summary.get('at_risk_count', 0)}",
+        f"  🟡 Watch: {summary.get('watch_count', 0)}",
+        f"  🟢 Healthy: {summary.get('healthy_count', 0)}",
+        "",
+        f"Average Health Score: {summary.get('average_health_score', 0):.1f}/100",
+        f"Worst File: {summary.get('worst_file', 'N/A')}",
+        f"Best File: {summary.get('best_file', 'N/A')}",
+        "=" * 80,
+        ""
+    ]
     
-    print()
-    print("📈 Summary Statistics:")
-    print(f"  Total files analyzed: {summary.get('total_files', 0)}")
-    print(f"  🔴 CRITICAL:  {summary.get('critical_count', 0)} files")
-    print(f"  🟠 AT_RISK:   {summary.get('at_risk_count', 0)} files")
-    print(f"  🟡 WATCH:     {summary.get('watch_count', 0)} files")
-    print(f"  🟢 HEALTHY:   {summary.get('healthy_count', 0)} files")
-    print(f"  Average score: {summary.get('average_health_score', 0):.1f}/100")
+    return "\n".join(lines)
+
+
+def export_markdown(report: Dict, output_path: str) -> None:
+    """
+    Export report as Markdown file.
     
-    print()
-    print("⚠️  Top Concerns (worst 3 files):")
+    Args:
+        report: DriftReport dict
+        output_path: Path to save Markdown file
+    """
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    summary = report.get('summary', {})
     files = report.get('files', [])
-    for i, f in enumerate(files[:3], 1):
-        path = f.get('file_path', 'unknown')
-        score = f.get('health_score', 0)
-        status = f.get('status_emoji', '❓')
-        risk = f.get('top_risk', 'N/A')
-        print(f"  {i}. {status} {path} ({score}/100)")
-        print(f"     Risk: {risk}")
     
-    print()
-    print("✅ Healthiest (best 3 files):")
-    for i, f in enumerate(files[-3:] if len(files) > 3 else [], 1):
-        path = f.get('file_path', 'unknown')
-        score = f.get('health_score', 0)
-        status = f.get('status_emoji', '❓')
-        print(f"  {i}. {status} {path} ({score}/100)")
+    # Build markdown content
+    lines = [
+        f"# DriftGuard Report",
+        f"",
+        f"**Repository:** {report.get('repo', 'Unknown')}  ",
+        f"**Analysis Window:** {report.get('analysis_window_days', 0)} days  ",
+        f"**Analyzed At:** {report.get('analyzed_at', 'Unknown')}  ",
+        f"",
+        f"## Summary",
+        f"",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Total Files | {summary.get('total_files', 0)} |",
+        f"| 🔴 Critical | {summary.get('critical_count', 0)} |",
+        f"| 🟠 At Risk | {summary.get('at_risk_count', 0)} |",
+        f"| 🟡 Watch | {summary.get('watch_count', 0)} |",
+        f"| 🟢 Healthy | {summary.get('healthy_count', 0)} |",
+        f"| Average Health Score | {summary.get('average_health_score', 0):.1f}/100 |",
+        f"",
+        f"**Worst File:** `{summary.get('worst_file', 'N/A')}`  ",
+        f"**Best File:** `{summary.get('best_file', 'N/A')}`  ",
+        f"",
+        f"## Files Requiring Attention",
+        f""
+    ]
     
-    print()
-    print("=" * 70)
+    # Add critical and at-risk files
+    critical_files = [f for f in files if f.get('status') == 'CRITICAL']
+    at_risk_files = [f for f in files if f.get('status') == 'AT_RISK']
+    
+    if critical_files:
+        lines.append("### 🔴 Critical Files")
+        lines.append("")
+        for file in critical_files:
+            lines.extend([
+                f"#### `{file['file_path']}`",
+                f"",
+                f"**Health Score:** {file['health_score']}/100  ",
+                f"**Top Risk:** {file.get('top_risk', 'N/A')}  ",
+                f"**Recommendation:** {file.get('recommendation', 'N/A')}  ",
+                f"",
+                f"**Dimension Scores:**",
+                f"- Documentation Drift: {file.get('documentation_drift_score', 0)}/100",
+                f"- Test Drift: {file.get('test_drift_score', 0)}/100",
+                f"- Complexity Growth: {file.get('complexity_growth_score', 0)}/100",
+                f"- Naming Consistency: {file.get('naming_consistency_score', 0)}/100",
+                f"",
+                f"**Analysis:** {file.get('decay_summary', 'N/A')}",
+                f"",
+                f"---",
+                f""
+            ])
+    
+    if at_risk_files:
+        lines.append("### 🟠 At Risk Files")
+        lines.append("")
+        for file in at_risk_files:
+            lines.extend([
+                f"#### `{file['file_path']}`",
+                f"",
+                f"**Health Score:** {file['health_score']}/100  ",
+                f"**Top Risk:** {file.get('top_risk', 'N/A')}  ",
+                f"**Recommendation:** {file.get('recommendation', 'N/A')}  ",
+                f"",
+                f"---",
+                f""
+            ])
+    
+    # Write to file
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    
+    print(f"✅ Markdown report saved to: {output_path}")
+
+
+def test_report_generator():
+    """
+    Test function to verify report generation.
+    """
+    import sys
+    import io
+    
+    # Set UTF-8 encoding for Windows console
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    
+    print("[TEST] Testing report generator...")
+    print("-" * 60)
+    
+    # Sample scored files
+    test_files = [
+        {
+            'file_path': 'app/critical.py',
+            'language': 'python',
+            'total_commits': 5,
+            'health_score': 35,
+            'status': 'CRITICAL',
+            'status_emoji': '🔴',
+            'documentation_drift_score': 20,
+            'test_drift_score': 30,
+            'complexity_growth_score': 40,
+            'naming_consistency_score': 50,
+            'decay_summary': 'Severe decay detected',
+            'top_risk': 'No documentation updates',
+            'recommendation': 'Add docstrings'
+        },
+        {
+            'file_path': 'app/healthy.py',
+            'language': 'python',
+            'total_commits': 2,
+            'health_score': 88,
+            'status': 'HEALTHY',
+            'status_emoji': '🟢',
+            'documentation_drift_score': 90,
+            'test_drift_score': 85,
+            'complexity_growth_score': 88,
+            'naming_consistency_score': 92,
+            'decay_summary': 'Well maintained',
+            'top_risk': 'None',
+            'recommendation': 'Keep up the good work'
+        }
+    ]
+    
+    # Generate report
+    report = generate_report(
+        scored_files=test_files,
+        repo_path='./test-repo',
+        analysis_days=30
+    )
+    
+    print("\n[RESULT] Generated report:")
+    print(f"  Repo: {report['repo']}")
+    print(f"  Days: {report['analysis_window_days']}")
+    print(f"  Files: {len(report['files'])}")
+    print(f"  Summary: {report['summary']}")
+    
+    # Test summary formatting
+    print("\n[FORMATTED SUMMARY]")
+    print(format_report_summary(report))
+    
+    print("=" * 60)
+    print("[TEST] Complete")
+
+
+if __name__ == '__main__':
+    test_report_generator()
+
+# Made with Bob

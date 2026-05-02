@@ -1,30 +1,29 @@
 """main.py
 
 FastAPI application for DriftGuard dashboard.
-Serves JSON reports and renders the web dashboard.
 """
-import json
-from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.templating import Jinja2Templates
+from pathlib import Path
+import json
+from typing import Optional
 
-from app.config import Config, get_latest_report
-from app.report_generator import load_report
+from app.config import Config
+from app.report_generator import get_latest_report, load_report
 
 
 # Initialize FastAPI app
 app = FastAPI(
     title="DriftGuard",
-    description="Codebase Decay Monitor",
-    version="1.0.0",
+    description="Codebase Decay Monitor - Dashboard API",
+    version="1.0.0"
 )
 
-# Add CORS middleware (allow all origins for local dev)
+# Add CORS middleware for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,108 +36,223 @@ app.add_middleware(
 templates = Jinja2Templates(directory=str(Config.TEMPLATES_DIR))
 
 
-def get_report_data() -> Optional[dict]:
-    """Load the most recent report from disk."""
-    latest = get_latest_report()
-    if latest is None:
-        return None
-    return load_report(str(latest))
+@app.on_event("startup")
+async def startup_event():
+    """Print startup message."""
+    print("\n" + "=" * 80)
+    print("🔍 DriftGuard Dashboard Starting...")
+    print("=" * 80)
+    print(f"Dashboard URL: http://{Config.FASTAPI_HOST}:{Config.FASTAPI_PORT}")
+    print(f"API Docs: http://{Config.FASTAPI_HOST}:{Config.FASTAPI_PORT}/docs")
+    print(f"Output Directory: {Config.OUTPUT_DIR}")
+    print("=" * 80)
+    print("\n💡 Tip: Run 'python driftguard.py --repo . --days 30' to generate a report first")
+    print()
 
 
-@app.get("/health", tags=["Health"])
-async def health():
-    """Health check endpoint."""
-    return {"status": "ok", "version": "1.0.0"}
-
-
-@app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
+@app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    """Serve the main dashboard HTML."""
-    report = get_report_data()
+    """
+    Render the main dashboard with the most recent report.
+    """
+    # Try to load the latest report
+    report = get_latest_report(str(Config.OUTPUT_DIR))
     
     if report is None:
-        return """
-        <!doctype html>
-        <html>
-          <head>
-            <meta charset="utf-8" />
-            <title>DriftGuard — Dashboard</title>
-            <style>
-              body { background:#1a1a2e; color:#e6eef8; font-family: Arial, sans-serif; padding:24px; margin:0; }
-              .container { max-width:1200px; margin:0 auto; }
-              .card { background:#16213e; padding:32px; border-radius:8px; text-align:center; }
-              h1 { margin:0 0 16px 0; }
-              p { margin:8px 0; color:#b0b8c8; }
-              code { background:#0f1419; padding:4px 8px; border-radius:4px; }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <div class="card">
-                <h1>🔍 DriftGuard</h1>
-                <p>No report found yet.</p>
-                <p>Run DriftGuard first:</p>
-                <code>python driftguard.py --repo . --days 30</code>
-                <p style="margin-top:24px; color:#888;">Then refresh this page.</p>
-              </div>
-            </div>
-          </body>
-        </html>
-        """
+        # No report found - show instructions
+        return templates.TemplateResponse(
+            "dashboard.html",
+            {
+                "request": request,
+                "report": None,
+                "no_report": True
+            }
+        )
     
     # Render dashboard with report data
-    return templates.TemplateResponse("dashboard.html", {"request": request, "report": report})
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "report": report,
+            "no_report": False
+        }
+    )
 
 
-@app.get("/api/report", tags=["API"])
+@app.get("/api/report")
 async def get_report():
-    """Return the most recent report as JSON."""
-    report = get_report_data()
+    """
+    Get the most recent report as JSON.
+    
+    Returns:
+        DriftReport JSON
+    
+    Raises:
+        404: If no report exists
+    """
+    report = get_latest_report(str(Config.OUTPUT_DIR))
     
     if report is None:
         raise HTTPException(
             status_code=404,
-            detail="No report found. Run 'python driftguard.py --repo . --days 30' first."
+            detail={
+                "error": "No report found",
+                "message": "Run DriftGuard analysis first: python driftguard.py --repo . --days 30",
+                "output_dir": str(Config.OUTPUT_DIR)
+            }
         )
     
-    return report
+    return JSONResponse(content=report)
 
 
-@app.get("/api/report/{filename}", tags=["API"])
-async def get_report_by_filename(filename: str):
-    """Return a specific report by filename."""
+@app.get("/api/report/{filename}")
+async def get_specific_report(filename: str):
+    """
+    Get a specific report by filename.
+    
+    Args:
+        filename: Report filename (e.g., "report_20260502_120000.json")
+    
+    Returns:
+        DriftReport JSON
+    
+    Raises:
+        404: If report file not found
+    """
     report_path = Config.OUTPUT_DIR / filename
     
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail=f"Report {filename} not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "Report not found",
+                "filename": filename,
+                "path": str(report_path)
+            }
+        )
     
-    if not str(report_path).endswith('.json'):
-        raise HTTPException(status_code=400, detail="Only JSON reports are supported")
-    
-    return load_report(str(report_path))
+    try:
+        report = load_report(str(report_path))
+        return JSONResponse(content=report)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Invalid report file",
+                "message": "Report file is corrupted or not valid JSON"
+            }
+        )
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Print startup information."""
-    port = Config.FASTAPI_PORT
-    host = Config.FASTAPI_HOST
-    print()
-    print("=" * 70)
-    print("DriftGuard Dashboard")
-    print("=" * 70)
-    print(f"Dashboard: http://{host}:{port}/")
-    print(f"API: http://{host}:{port}/api/report")
-    print(f"Docs: http://{host}:{port}/docs")
-    print("=" * 70)
-    print()
+@app.get("/api/reports")
+async def list_reports():
+    """
+    List all available reports.
+    
+    Returns:
+        List of report metadata (filename, timestamp, file size)
+    """
+    if not Config.OUTPUT_DIR.exists():
+        return JSONResponse(content={"reports": []})
+    
+    reports = []
+    for report_file in Config.OUTPUT_DIR.glob("report_*.json"):
+        stat = report_file.stat()
+        reports.append({
+            "filename": report_file.name,
+            "path": str(report_file),
+            "size_bytes": stat.st_size,
+            "modified_at": stat.st_mtime,
+            "url": f"/api/report/{report_file.name}"
+        })
+    
+    # Sort by modification time (newest first)
+    reports.sort(key=lambda x: x["modified_at"], reverse=True)
+    
+    return JSONResponse(content={"reports": reports, "count": len(reports)})
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint.
+    
+    Returns:
+        Status information
+    """
+    latest_report = get_latest_report(str(Config.OUTPUT_DIR))
+    
+    return JSONResponse(content={
+        "status": "ok",
+        "version": "1.0.0",
+        "service": "DriftGuard Dashboard",
+        "has_report": latest_report is not None,
+        "output_dir": str(Config.OUTPUT_DIR)
+    })
+
+
+@app.get("/api/summary")
+async def get_summary():
+    """
+    Get just the summary statistics from the latest report.
+    
+    Returns:
+        Summary dict
+    
+    Raises:
+        404: If no report exists
+    """
+    report = get_latest_report(str(Config.OUTPUT_DIR))
+    
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No report found"
+        )
+    
+    return JSONResponse(content={
+        "summary": report.get("summary", {}),
+        "repo": report.get("repo"),
+        "analyzed_at": report.get("analyzed_at"),
+        "analysis_window_days": report.get("analysis_window_days")
+    })
+
+
+# Error handlers
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    """Custom 404 handler."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "Not Found",
+            "detail": str(exc.detail) if hasattr(exc, 'detail') else "Resource not found",
+            "path": str(request.url)
+        }
+    )
+
+
+@app.exception_handler(500)
+async def internal_error_handler(request: Request, exc: Exception):
+    """Custom 500 handler."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal Server Error",
+            "detail": str(exc),
+            "path": str(request.url)
+        }
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        app,
+        "app.main:app",
         host=Config.FASTAPI_HOST,
         port=Config.FASTAPI_PORT,
-        reload=Config.FASTAPI_RELOAD,
+        reload=Config.FASTAPI_RELOAD
     )
+
+# Made with Bob
