@@ -131,6 +131,8 @@ class Config:
     BOB_RATE_LIMIT_BURST = int(os.getenv("BOB_RATE_LIMIT_BURST", "5"))  # Burst capacity
     
     # Parallel processing settings
+    MAX_WORKERS = int(os.getenv("DRIFTGUARD_MAX_WORKERS", str(min(8, __import__('os').cpu_count() or 4))))
+    
     # Language configuration file path
     LANGUAGE_CONFIG_PATH = Path(os.getenv(
         "DRIFTGUARD_LANGUAGE_CONFIG",
