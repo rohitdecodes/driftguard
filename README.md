@@ -66,7 +66,7 @@ That's it! You now have a complete decay analysis of your repository.
 | **Input Validation** | User-friendly error messages and hints | ✅ Complete |
 | **Baseline Profiles** | Context-aware scoring based on codebase norms | ✅ Complete |
 | **Comprehensive CLI** | Full-featured command-line interface | ✅ Complete |
-| **VS Code Extension** | Inline decay warnings in your editor | 🔄 Planned |
+| **VS Code Extension** | Inline decay warnings in your editor | ✅ Complete |
 | **Team Dashboard** | Multi-repo aggregate views | 🔄 Planned |
 
 ## Architecture
