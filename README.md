@@ -474,7 +474,6 @@ DriftGuard is released under the MIT License. See [LICENSE](LICENSE) for details
 ## Contact & Support
 
 - **GitHub Issues**: [Report bugs](https://github.com/rohitdecodes/driftguard/issues)
-- **GitHub Discussions**: [Feature requests and questions](https://github.com/rohitdecodes/driftguard/discussions)
 - **Project Repository**: [https://github.com/rohitdecodes/driftguard](https://github.com/rohitdecodes/driftguard)
 
 ---
