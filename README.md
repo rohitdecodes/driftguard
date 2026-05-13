@@ -149,6 +149,30 @@ python driftguard.py --repo . --remediate
 # Remediation files are saved to remediation/ directory
 ```
 
+### Remediation Behavior
+
+- DriftGuard does not ship its own model provider.
+- AI-generated remediation requires the external Bob CLI to be installed and available on your PATH.
+- If Bob is missing, times out, or returns an error, DriftGuard falls back to a built-in deterministic remediation template.
+- The fallback is useful for testing, but it will not produce AI-generated suggestions.
+
+### Bob Setup
+
+To use AI remediation, install Bob separately according to Bob's own documentation, then verify it is available:
+
+```bash
+bob --version
+bob shell --help
+```
+
+Once Bob is installed, run a remediation pass:
+
+```bash
+python driftguard.py --repo . --remediate
+```
+
+If you only want to test the non-AI path, you can run the same command without Bob installed; DriftGuard will generate the fallback remediation markdown instead.
+
 ### Watch Mode
 
 ```bash
@@ -266,6 +290,14 @@ BOB_RATE_LIMIT_PER_MINUTE=30    # Max Bob API calls per minute
 BOB_RATE_LIMIT_BURST=5          # Burst capacity for rapid requests
 ```
 
+### Bob Integration
+
+Bob is an external CLI dependency used for AI remediation. DriftGuard does not store or manage a Bob API key in this repository.
+
+- Install Bob separately before using `--remediate` if you want AI-generated output.
+- Keep the rate limit settings above if you expect to make many Bob calls.
+- If Bob is not installed, remediation still works through the fallback template, but the output will be static.
+
 ### GitHub Integration
 
 ```bash
@@ -366,7 +398,7 @@ docker run -d \
 
 - [x] SQLite persistence and trend tracking
 - [x] Parallel file analysis with caching
-- [x] Rate-limited Bob integration
+- [x] Rate-limited Bob integration with fallback remediation
 - [x] GitHub remote repository support
 - [x] Multi-language support (Python, JS, TS, Java, Go, Ruby, HTML, CSS)
 - [x] API key authentication
