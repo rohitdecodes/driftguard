@@ -497,8 +497,6 @@ pytest
 python driftguard.py --repo . --verbose
 ```
 
-For detailed contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) (coming soon).
-
 ## License
 
 DriftGuard is released under the MIT License. See [LICENSE](LICENSE) for details.
