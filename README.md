@@ -410,10 +410,10 @@ docker run -d \
 - [x] Input validation with user-friendly errors
 - [x] Baseline profiles for context-aware scoring
 - [x] Comprehensive CLI with validation
+- [x] VS Code extension with inline warnings
 
 ### Phase 3 (Team Features) 🔄 IN PROGRESS
 
-- [ ] VS Code extension with inline warnings
 - [ ] Advanced team dashboard with multi-repo views
 - [ ] LLM-powered insights and recommendations
 - [ ] GitLab and Bitbucket support
